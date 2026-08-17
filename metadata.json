@@ -1,0 +1,6 @@
+{
+  "name": "QR Drop - Transferencia Directa QR & P2P",
+  "description": "Transferencia rápida y privada de archivos pesados y textos sin subir a la nube mediante QR dinámico local y WebRTC.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
