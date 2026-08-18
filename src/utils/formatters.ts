@@ -45,9 +45,13 @@ export function detectDeviceName(): { name: string; originalName: string; type: 
 
   let name = originalName;
   try {
-    const savedAlias = localStorage.getItem('qrdrop_device_alias');
+    const aliasKey = 'dropthing.deviceAlias';
+    const legacyAliasKey = 'qrdrop_device_alias';
+    const savedAlias = localStorage.getItem(aliasKey) || localStorage.getItem(legacyAliasKey);
     if (savedAlias && savedAlias.trim()) {
       name = savedAlias.trim();
+      localStorage.setItem(aliasKey, name);
+      localStorage.removeItem(legacyAliasKey);
     }
   } catch (e) {
     // Ignore localStorage error
@@ -60,7 +64,8 @@ export function generateRoomId(length = 6): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Avoid ambiguous chars like O, 0, I, 1
   let result = '';
   for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    const randomIndex = crypto.getRandomValues(new Uint32Array(1))[0] % chars.length;
+    result += chars.charAt(randomIndex);
   }
   return result;
 }

@@ -1,23 +1,33 @@
 import { io, Socket } from 'socket.io-client';
-import { PeerDevice, TransferItem } from '../types';
+import { FileTransferMeta, PeerDevice, SignalingPayload } from '../types';
 
 const CHUNK_SIZE = 64 * 1024; // 64 KB per chunk
 const BUFFER_THRESHOLD = 256 * 1024; // 256 KB flow control buffer threshold
+const DEFAULT_ICE_SERVER = 'stun:stun.cloudflare.com:3478';
+
+function getIceServers(): RTCIceServer[] {
+  const configuredUrls = import.meta.env.VITE_ICE_SERVERS?.split(',')
+    .map((url) => url.trim())
+    .filter(Boolean);
+  return (configuredUrls?.length ? configuredUrls : [DEFAULT_ICE_SERVER]).map((urls) => ({ urls }));
+}
 
 export interface WebRTCEvents {
   onPeerJoined: (peer: PeerDevice) => void;
   onPeerRenamed?: (peerId: string, name: string, originalName?: string) => void;
   onPeerLeft: (peerId: string) => void;
-  onRoomJoined: (roomId: string, myPeerId: string, peers: PeerDevice[], isAdmin?: boolean, hasPin?: boolean, pin?: string | null) => void;
-  onJoinFailed?: (reason: 'PIN_REQUIRED' | 'INVALID_PIN', message: string, roomId: string) => void;
+  onRoomJoined: (roomId: string, myPeerId: string, peers: PeerDevice[], isAdmin?: boolean, hasPin?: boolean, adminToken?: string) => void;
+  onJoinFailed?: (reason: 'PIN_REQUIRED' | 'INVALID_PIN' | 'INVALID_ROOM', message: string, roomId: string) => void;
   onRoomSecurityUpdated?: (hasPin: boolean, pin?: string | null) => void;
   onRoomAdminsUpdated?: (adminPeerIds: string[], targetPeerId: string, isAdmin: boolean) => void;
-  onFileMetaReceived: (fileMeta: any, senderPeerId: string) => void;
+  onAdminTokenIssued?: (roomId: string, adminToken: string) => void;
+  onAdminTokenRevoked?: (roomId: string) => void;
+  onFileMetaReceived: (fileMeta: FileTransferMeta, senderPeerId: string) => void;
   onFileProgress: (fileId: string, progress: number, bytesReceived: number, speed: number, eta: number) => void;
-  onFileComplete: (fileId: string, blob: Blob, meta: any) => void;
+  onFileComplete: (fileId: string, blob: Blob, meta: FileTransferMeta) => void;
   onTextReceived: (text: string, senderName: string, timestamp: number) => void;
   onChatReceived: (text: string, senderName: string, timestamp: number) => void;
-  onFilesOffered: (filesMeta: any[], senderPeerId: string, senderName: string) => void;
+  onFilesOffered: (filesMeta: FileTransferMeta[], senderPeerId: string, senderName: string) => void;
   onFileRequested: (fileId: string, requesterPeerId: string) => void;
   onConnectionStatus: (status: 'disconnected' | 'connecting' | 'connected') => void;
   onError: (msg: string) => void;
@@ -27,7 +37,9 @@ export class WebRTCManager {
   private socket: Socket | null = null;
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
   private dataChannels: Map<string, RTCDataChannel> = new Map();
+  private knownPeerIds = new Set<string>();
   private events: WebRTCEvents;
+  private adminToken?: string;
 
   public roomId: string = '';
   public myPeerId: string = '';
@@ -39,7 +51,7 @@ export class WebRTCManager {
 
   // Receiving state: fileId -> { meta, chunks: [], bytesReceived, startTime, lastTime, lastBytes }
   private receivingFiles: Map<string, {
-    meta: any;
+    meta: FileTransferMeta;
     chunks: ArrayBuffer[];
     bytesReceived: number;
     startTime: number;
@@ -54,12 +66,13 @@ export class WebRTCManager {
     this.events = events;
   }
 
-  public connect(roomId: string, deviceName: string, deviceType: string, pin?: string | null, isCreator?: boolean, originalName?: string) {
+  public connect(roomId: string, deviceName: string, deviceType: string, pin?: string | null, adminToken?: string, originalName?: string) {
     this.roomId = roomId.toUpperCase();
     this.deviceName = deviceName;
     this.originalName = originalName || deviceName;
     this.deviceType = deviceType;
     this.roomPin = pin || null;
+    this.adminToken = adminToken;
 
     if (this.socket) {
       this.socket.disconnect();
@@ -67,21 +80,21 @@ export class WebRTCManager {
 
     this.events.onConnectionStatus('connecting');
 
-    this.socket = io({
+    const signalingUrl = import.meta.env.VITE_SIGNALING_URL?.trim() || undefined;
+    this.socket = io(signalingUrl, {
       transports: ['websocket', 'polling'],
       autoConnect: true,
       reconnectionAttempts: 10,
     });
 
     this.socket.on('connect', () => {
-      this.events.onConnectionStatus('connected');
       this.socket?.emit('join-room', {
         roomId: this.roomId,
         deviceName: this.deviceName,
         originalName: this.originalName,
         deviceType: this.deviceType,
         pin: this.roomPin,
-        isCreator,
+        adminToken: this.adminToken,
       });
     });
 
@@ -89,7 +102,7 @@ export class WebRTCManager {
       this.events.onConnectionStatus('disconnected');
     });
 
-    this.socket.on('join-failed', (data: { reason: 'PIN_REQUIRED' | 'INVALID_PIN'; message: string; roomId: string }) => {
+    this.socket.on('join-failed', (data: { reason: 'PIN_REQUIRED' | 'INVALID_PIN' | 'INVALID_ROOM'; message: string; roomId: string }) => {
       this.events.onConnectionStatus('disconnected');
       if (this.events.onJoinFailed) {
         this.events.onJoinFailed(data.reason, data.message, data.roomId);
@@ -98,13 +111,13 @@ export class WebRTCManager {
       }
     });
 
-    this.socket.on('room-joined', (data: { roomId: string; peerId: string; existingPeers: PeerDevice[]; isAdmin?: boolean; hasPin?: boolean; pin?: string | null }) => {
+    this.socket.on('room-joined', (data: { roomId: string; peerId: string; existingPeers: PeerDevice[]; isAdmin?: boolean; hasPin?: boolean; adminToken?: string }) => {
       this.myPeerId = data.peerId;
       this.isAdmin = !!data.isAdmin;
-      if (data.pin !== undefined) {
-        this.roomPin = data.pin;
-      }
-      this.events.onRoomJoined(data.roomId, data.peerId, data.existingPeers, data.isAdmin, data.hasPin, data.pin);
+      this.adminToken = data.adminToken ?? this.adminToken;
+      this.knownPeerIds = new Set(data.existingPeers.map((peer) => peer.id));
+      this.events.onConnectionStatus('connected');
+      this.events.onRoomJoined(data.roomId, data.peerId, data.existingPeers, data.isAdmin, data.hasPin, data.adminToken);
 
       // Create WebRTC offer for existing peers in room
       data.existingPeers.forEach((peer) => {
@@ -130,11 +143,24 @@ export class WebRTCManager {
       }
     });
 
+    this.socket.on('admin-token-issued', (data: { roomId: string; adminToken: string }) => {
+      this.isAdmin = true;
+      this.adminToken = data.adminToken;
+      this.events.onAdminTokenIssued?.(data.roomId, data.adminToken);
+    });
+
+    this.socket.on('admin-token-revoked', (data: { roomId: string }) => {
+      this.isAdmin = false;
+      this.adminToken = undefined;
+      this.events.onAdminTokenRevoked?.(data.roomId);
+    });
+
     this.socket.on('error-message', (data: { message: string }) => {
       this.events.onError(data.message);
     });
 
     this.socket.on('peer-joined', (data: { peerId: string; peer: PeerDevice }) => {
+      this.knownPeerIds.add(data.peerId);
       this.events.onPeerJoined(data.peer);
     });
 
@@ -145,15 +171,18 @@ export class WebRTCManager {
     });
 
     this.socket.on('peer-left', (data: { peerId: string }) => {
+      this.knownPeerIds.delete(data.peerId);
       this.closePeer(data.peerId);
       this.events.onPeerLeft(data.peerId);
     });
 
-    this.socket.on('signal', async (data: { senderPeerId: string; signal: any }) => {
-      await this.handleSignal(data.senderPeerId, data.signal);
+    this.socket.on('signal', (data: { senderPeerId: string; signal: SignalingPayload }) => {
+      this.handleSignal(data.senderPeerId, data.signal).catch(() => {
+        this.events.onError('No se pudo establecer el canal P2P con otro dispositivo.');
+      });
     });
 
-    this.socket.on('file-meta', (data: { senderPeerId: string; fileMeta: any }) => {
+    this.socket.on('file-meta', (data: { senderPeerId: string; fileMeta: FileTransferMeta }) => {
       this.receivingFiles.set(data.fileMeta.id, {
         meta: data.fileMeta,
         chunks: [],
@@ -176,6 +205,14 @@ export class WebRTCManager {
     this.socket.on('chat-received', (data: { senderPeerId: string; senderName: string; text: string; timestamp: number }) => {
       this.events.onChatReceived(data.text, data.senderName, data.timestamp);
     });
+
+    this.socket.on('files-offered', (data: { senderPeerId: string; senderName: string; files: FileTransferMeta[] }) => {
+      this.events.onFilesOffered(data.files, data.senderPeerId, data.senderName);
+    });
+
+    this.socket.on('file-requested', (data: { fileId: string; requesterPeerId: string }) => {
+      this.events.onFileRequested(data.fileId, data.requesterPeerId);
+    });
   }
 
   public updateDeviceName(newName: string, originalName?: string) {
@@ -192,6 +229,7 @@ export class WebRTCManager {
     this.peerConnections.forEach((pc) => pc.close());
     this.peerConnections.clear();
     this.dataChannels.clear();
+    this.knownPeerIds.clear();
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -204,13 +242,7 @@ export class WebRTCManager {
       return this.peerConnections.get(targetPeerId)!;
     }
 
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-      ],
-    });
+    const pc = new RTCPeerConnection({ iceServers: getIceServers() });
 
     this.peerConnections.set(targetPeerId, pc);
 
@@ -225,11 +257,11 @@ export class WebRTCManager {
     };
 
     if (isInitiator) {
-      const dc = pc.createDataChannel('qrdrop-channel', { ordered: true });
+      const dc = pc.createDataChannel('dropthing-channel', { ordered: true });
       this.setupDataChannel(targetPeerId, dc);
 
-      pc.createOffer().then((offer) => {
-        pc.setLocalDescription(offer);
+      pc.createOffer().then(async (offer) => {
+        await pc.setLocalDescription(offer);
         this.socket?.emit('signal', {
           targetPeerId,
           roomId: this.roomId,
@@ -289,7 +321,7 @@ export class WebRTCManager {
     };
   }
 
-  private async handleSignal(senderPeerId: string, signal: any) {
+  private async handleSignal(senderPeerId: string, signal: SignalingPayload) {
     let pc = this.peerConnections.get(senderPeerId);
     if (!pc) {
       pc = this.createPeerConnection(senderPeerId, false);
@@ -355,21 +387,12 @@ export class WebRTCManager {
     });
 
     let sentCount = 0;
-    this.dataChannels.forEach((dc) => {
-      if (dc.readyState === 'open') {
-        dc.send(payload);
-        sentCount++;
-      }
-    });
-
-    if (this.socket) {
-      this.socket.emit('share-text', {
-        roomId: this.roomId,
-        text,
-        senderName: this.deviceName,
-      });
+    this.knownPeerIds.forEach((peerId) => {
+      const channel = this.dataChannels.get(peerId);
+      if (channel?.readyState === 'open') channel.send(payload);
+      else this.socket?.emit('share-text', { roomId: this.roomId, targetPeerId: peerId, text, senderName: this.deviceName });
       sentCount++;
-    }
+    });
 
     return sentCount > 0;
   }
@@ -384,27 +407,17 @@ export class WebRTCManager {
     });
 
     let sentCount = 0;
-    this.dataChannels.forEach((dc) => {
-      if (dc.readyState === 'open') {
-        dc.send(payload);
-        sentCount++;
-      }
-    });
-
-    if (this.socket) {
-      // we can use the same event but with type or just a new event. Let's stick to P2P only or use 'share-chat'
-      this.socket.emit('share-chat', {
-        roomId: this.roomId,
-        text,
-        senderName: sender,
-      });
+    this.knownPeerIds.forEach((peerId) => {
+      const channel = this.dataChannels.get(peerId);
+      if (channel?.readyState === 'open') channel.send(payload);
+      else this.socket?.emit('share-chat', { roomId: this.roomId, targetPeerId: peerId, text, senderName: sender });
       sentCount++;
-    }
+    });
 
     return sentCount > 0;
   }
 
-  public offerFiles(filesMeta: any[]): boolean {
+  public offerFiles(filesMeta: FileTransferMeta[]): boolean {
     const payload = JSON.stringify({
       type: 'offer_files',
       files: filesMeta,
@@ -412,11 +425,11 @@ export class WebRTCManager {
     });
 
     let sentCount = 0;
-    this.dataChannels.forEach((dc) => {
-      if (dc.readyState === 'open') {
-        dc.send(payload);
-        sentCount++;
-      }
+    this.knownPeerIds.forEach((peerId) => {
+      const channel = this.dataChannels.get(peerId);
+      if (channel?.readyState === 'open') channel.send(payload);
+      else this.socket?.emit('offer-files', { roomId: this.roomId, targetPeerId: peerId, files: filesMeta, senderName: this.deviceName });
+      sentCount++;
     });
     return sentCount > 0;
   }
@@ -431,12 +444,17 @@ export class WebRTCManager {
       dc.send(payload);
       return true;
     }
+    if (this.socket && this.knownPeerIds.has(targetPeerId)) {
+      this.socket.emit('request-file', { roomId: this.roomId, targetPeerId, fileId });
+      return true;
+    }
     return false;
   }
 
   public sendFile(
     file: File,
     fileId: string,
+    targetPeerId: string,
     onProgress: (progress: number, bytesSent: number, speed: number, eta: number) => void,
     onComplete: () => void,
     onError: (err: string) => void
@@ -444,7 +462,7 @@ export class WebRTCManager {
     const activeState = { canceled: false, paused: false };
     this.activeSending.set(fileId, activeState);
 
-    const meta = {
+    const meta: FileTransferMeta = {
       id: fileId,
       name: file.name,
       size: file.size,
@@ -453,12 +471,14 @@ export class WebRTCManager {
       senderName: this.deviceName,
     };
 
-    // Broadcast file header to peers via DataChannel & Socket
+    // Send only to the peer that requested this file.
     const headerStr = JSON.stringify({ type: 'file-header', fileMeta: meta });
-    this.dataChannels.forEach((dc) => {
-      if (dc.readyState === 'open') dc.send(headerStr);
-    });
-    this.socket?.emit('file-meta', { roomId: this.roomId, fileMeta: meta });
+    const initialChannel = this.dataChannels.get(targetPeerId);
+    if (initialChannel?.readyState === 'open') {
+      initialChannel.send(headerStr);
+    } else {
+      this.socket?.emit('file-meta', { roomId: this.roomId, targetPeerId, fileMeta: meta });
+    }
 
     // Prepare binary chunk header tag (fileId prepended to each chunk)
     const encoder = new TextEncoder();
@@ -490,11 +510,10 @@ export class WebRTCManager {
         return;
       }
 
-      const openChannels = Array.from(this.dataChannels.values()).filter((dc) => dc.readyState === 'open');
+      const targetChannel = this.dataChannels.get(targetPeerId);
 
       // Check backpressure on open DataChannels
-      const maxBuffered = Math.max(...openChannels.map((dc) => dc.bufferedAmount), 0);
-      if (openChannels.length > 0 && maxBuffered > BUFFER_THRESHOLD * 2) {
+      if (targetChannel?.readyState === 'open' && targetChannel.bufferedAmount > BUFFER_THRESHOLD * 2) {
         setTimeout(readAndSend, 10);
         return;
       }
@@ -511,12 +530,13 @@ export class WebRTCManager {
         chunkWithHeader.set(headerPrefix, 0);
         chunkWithHeader.set(new Uint8Array(rawChunk), headerPrefix.length);
 
-        if (openChannels.length > 0) {
-          openChannels.forEach((dc) => dc.send(chunkWithHeader.buffer));
+        if (targetChannel?.readyState === 'open') {
+          targetChannel.send(chunkWithHeader.buffer);
         } else if (this.socket) {
           // Fallback over Socket.io
           this.socket.emit('file-chunk-fallback', {
             roomId: this.roomId,
+            targetPeerId,
             chunk: rawChunk,
             fileId,
           });

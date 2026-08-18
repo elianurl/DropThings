@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DropThing">
+  <defs>
+    <linearGradient id="dropthing-gradient" x1="80" y1="64" x2="432" y2="448" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="#050507"/>
+  <path d="M256 80c72 88 120 144 120 216a120 120 0 1 1-240 0c0-72 48-128 120-216Z" fill="url(#dropthing-gradient)"/>
+  <path d="M256 160v152m-56-56 56 56 56-56" fill="none" stroke="#050507" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M192 376h128" fill="none" stroke="#050507" stroke-width="32" stroke-linecap="round"/>
+</svg>

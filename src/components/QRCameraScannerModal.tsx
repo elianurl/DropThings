@@ -63,10 +63,13 @@ export const QRCameraScannerModal: React.FC<QRCameraScannerModalProps> = ({
         setHasPermission(true);
         requestAnimationFrame(tickScan);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Camera error:', err);
       setHasPermission(false);
-      setErrorMsg('No se pudo acceder a la cámara. Permite el acceso o sube una captura con el código QR.');
+      const permissionDenied = err instanceof DOMException && err.name === 'NotAllowedError';
+      setErrorMsg(permissionDenied
+        ? 'Permiso de cámara denegado. Actívalo en los ajustes del navegador o sube una captura.'
+        : 'No se pudo acceder a la cámara. Permite el acceso o sube una captura con el código QR.');
     }
   };
 

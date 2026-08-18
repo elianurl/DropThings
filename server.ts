@@ -1,331 +1,389 @@
-import express from "express";
-import http from "http";
-import path from "path";
-import { Server } from "socket.io";
-import { createServer as createViteServer } from "vite";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import http from 'node:http';
+import path from 'node:path';
+import express from 'express';
+import { Server, Socket } from 'socket.io';
+import { createServer as createViteServer } from 'vite';
+import { cleanText, normalizeRoomId, PROTOCOL_LIMITS } from './shared/protocol';
 
 interface RoomPeer {
   id: string;
-  deviceType: string;
+  deviceType: 'mobile' | 'desktop' | 'tablet' | 'browser';
   name: string;
   originalName?: string;
-  isAdmin?: boolean;
+  status: 'connected';
+  joinedAt: number;
+  isAdmin: boolean;
+}
+
+interface PinCredential {
+  hash: Buffer;
+  salt: string;
 }
 
 interface RoomInfo {
   id: string;
   createdAt: number;
-  pin?: string | null;
-  creatorSocketId?: string;
-  adminSocketIds: Set<string>;
+  pinCredential: PinCredential | null;
+  adminTokens: Set<string>;
+  socketAdminTokens: Map<string, string>;
   peers: Map<string, RoomPeer>;
 }
 
+interface FileMetaPayload {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  lastModified?: number;
+  senderName?: string;
+}
+
 const rooms = new Map<string, RoomInfo>();
+const DEFAULT_PORT = 3000;
+const ROOM_TTL_MS = 10 * 60 * 1000;
+const SOCKET_BUFFER_LIMIT = 2 * 1024 * 1024;
+
+function createAdminToken(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+function createPinCredential(pin: string): PinCredential {
+  const salt = randomBytes(16).toString('hex');
+  return { salt, hash: scryptSync(pin, salt, 64) };
+}
+
+function isValidPin(pin: string, credential: PinCredential): boolean {
+  return timingSafeEqual(scryptSync(pin, credential.salt, 64), credential.hash);
+}
+
+function parsePort(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65_535 ? parsed : DEFAULT_PORT;
+}
+
+function getAllowedOrigins(): Set<string> {
+  const configured = process.env.ALLOWED_ORIGINS?.split(',').map((origin) => origin.trim()).filter(Boolean) ?? [];
+  const defaults = [
+    process.env.PUBLIC_APP_URL,
+    'https://dropthings.vercel.app',
+    'http://localhost:3000',
+    'http://localhost:5173',
+  ].filter((origin): origin is string => Boolean(origin));
+  return new Set([...configured, ...defaults]);
+}
+
+function isAllowedOrigin(origin: string | undefined, allowedOrigins: Set<string>): boolean {
+  if (!origin || allowedOrigins.has(origin)) return true;
+  return process.env.NODE_ENV !== 'production' && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
+}
+
+function parseDeviceType(value: unknown): RoomPeer['deviceType'] {
+  return value === 'mobile' || value === 'desktop' || value === 'tablet' ? value : 'browser';
+}
+
+function parseFileMeta(value: unknown): FileMetaPayload | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  const id = cleanText(candidate.id, PROTOCOL_LIMITS.fileId);
+  const name = cleanText(candidate.name, PROTOCOL_LIMITS.fileName);
+  const type = cleanText(candidate.type, 128) ?? 'application/octet-stream';
+  const size = Number(candidate.size);
+  if (!id || !name || !Number.isSafeInteger(size) || size < 0 || size > PROTOCOL_LIMITS.fileSize) return null;
+
+  return {
+    id,
+    name,
+    size,
+    type,
+    lastModified: typeof candidate.lastModified === 'number' ? candidate.lastModified : undefined,
+    senderName: cleanText(candidate.senderName, PROTOCOL_LIMITS.displayName) ?? undefined,
+  };
+}
+
+function emitError(socket: Socket, message: string): void {
+  socket.emit('error-message', { message });
+}
 
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
+  const allowedOrigins = getAllowedOrigins();
   const io = new Server(server, {
     cors: {
-      origin: "*",
-      methods: ["GET", "POST"],
+      origin: (origin, callback) => callback(null, isAllowedOrigin(origin, allowedOrigins)),
+      methods: ['GET', 'POST'],
     },
-    maxHttpBufferSize: 1e8, // 100MB buffer for fallback WebSocket direct binary transfer
+    maxHttpBufferSize: SOCKET_BUFFER_LIMIT,
+  });
+  const port = parsePort(process.env.PORT);
+
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '32kb' }));
+
+  app.get('/api/health', (_request, response) => {
+    response.json({ status: 'ok', activeRooms: rooms.size, timestamp: Date.now() });
   });
 
-  const PORT = 3000;
-
-  app.use(express.json({ limit: "50mb" }));
-
-  // API endpoints
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", activeRooms: rooms.size, timestamp: Date.now() });
-  });
-
-  app.get("/api/rooms/:roomId", (req, res) => {
-    const room = rooms.get(req.params.roomId.toUpperCase());
+  app.get('/api/rooms/:roomId', (request, response) => {
+    const roomId = normalizeRoomId(request.params.roomId);
+    const room = roomId ? rooms.get(roomId) : undefined;
     if (!room) {
-      res.status(404).json({ exists: false, peerCount: 0, hasPin: false });
+      response.status(404).json({ exists: false, peerCount: 0, hasPin: false });
       return;
     }
-    res.json({
-      exists: true,
-      hasPin: !!room.pin,
-      peerCount: room.peers.size,
-      peers: Array.from(room.peers.values()),
-    });
+    response.json({ exists: true, hasPin: Boolean(room.pinCredential), peerCount: room.peers.size });
   });
 
-  // Socket.IO WebRTC Signaling & Room Management
-  io.on("connection", (socket) => {
+  io.on('connection', (socket) => {
     let currentRoomId: string | null = null;
 
-    socket.on("join-room", (data: { roomId: string; deviceName?: string; originalName?: string; deviceType?: string; pin?: string | null; isCreator?: boolean }) => {
-      const roomId = data.roomId.toUpperCase();
+    const leaveCurrentRoom = () => {
+      if (!currentRoomId) return;
+      const roomId = currentRoomId;
+      const room = rooms.get(roomId);
+      currentRoomId = null;
+      socket.leave(roomId);
+      if (!room) return;
+
+      room.peers.delete(socket.id);
+      room.socketAdminTokens.delete(socket.id);
+      io.to(roomId).emit('peer-left', { peerId: socket.id, totalPeers: room.peers.size });
+
+      if (room.peers.size === 0) {
+        setTimeout(() => {
+          const staleRoom = rooms.get(roomId);
+          if (staleRoom?.peers.size === 0) rooms.delete(roomId);
+        }, ROOM_TTL_MS);
+      }
+    };
+
+    const getCurrentRoom = (requestedRoomId?: unknown): RoomInfo | null => {
+      const roomId = normalizeRoomId(requestedRoomId ?? currentRoomId);
+      if (!roomId || roomId !== currentRoomId) return null;
+      const room = rooms.get(roomId);
+      return room?.peers.has(socket.id) ? room : null;
+    };
+
+    socket.on('join-room', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const roomId = normalizeRoomId(data.roomId);
+      if (!roomId) {
+        socket.emit('join-failed', { roomId: '', reason: 'INVALID_ROOM', message: 'El código de sala no es válido.' });
+        return;
+      }
+
+      if (currentRoomId && currentRoomId !== roomId) leaveCurrentRoom();
 
       let room = rooms.get(roomId);
       const isNewRoom = !room;
+      let adminToken = cleanText(data.adminToken, 128);
 
       if (!room) {
+        adminToken = createAdminToken();
         room = {
           id: roomId,
           createdAt: Date.now(),
-          pin: data.pin && String(data.pin).trim() ? String(data.pin).trim() : null,
-          creatorSocketId: socket.id,
-          adminSocketIds: new Set([socket.id]),
+          pinCredential: null,
+          adminTokens: new Set([adminToken]),
+          socketAdminTokens: new Map(),
           peers: new Map(),
         };
+        const initialPin = cleanText(data.pin, PROTOCOL_LIMITS.pin);
+        if (initialPin) room.pinCredential = createPinCredential(initialPin);
         rooms.set(roomId, room);
-      } else {
-        // If room has PIN set and it's not the already authorized creator
-        if (room.pin && room.pin.length > 0) {
-          const providedPin = data.pin ? String(data.pin).trim() : "";
-          const isKnownAdmin = room.adminSocketIds.has(socket.id);
+      }
 
-          if (!isKnownAdmin && providedPin !== room.pin) {
-            // Reject join due to missing or invalid PIN
-            socket.emit("join-failed", {
-              roomId,
-              reason: providedPin ? "INVALID_PIN" : "PIN_REQUIRED",
-              message: providedPin
-                ? "El PIN de acceso introducido es incorrecto."
-                : "Esta sala requiere un PIN de acceso establecido por el administrador.",
-            });
-            return;
-          }
+      const hasValidAdminToken = Boolean(adminToken && room.adminTokens.has(adminToken));
+      if (room.pinCredential && !hasValidAdminToken) {
+        const providedPin = cleanText(data.pin, PROTOCOL_LIMITS.pin);
+        if (!providedPin || !isValidPin(providedPin, room.pinCredential)) {
+          socket.emit('join-failed', {
+            roomId,
+            reason: providedPin ? 'INVALID_PIN' : 'PIN_REQUIRED',
+            message: providedPin ? 'El PIN de acceso introducido es incorrecto.' : 'Esta sala requiere un PIN de acceso.',
+          });
+          return;
         }
       }
 
       currentRoomId = roomId;
       socket.join(roomId);
+      if (hasValidAdminToken && adminToken) room.socketAdminTokens.set(socket.id, adminToken);
 
-      // If user created this room or is in admin list, mark admin
-      const isUserAdmin = isNewRoom || data.isCreator || room.adminSocketIds.has(socket.id);
-      if (isUserAdmin) {
-        room.adminSocketIds.add(socket.id);
-      }
-
-      const peerInfo: RoomPeer = {
+      const peer: RoomPeer = {
         id: socket.id,
-        name: data.deviceName || "Dispositivo Remoto",
-        originalName: data.originalName,
-        deviceType: data.deviceType || "browser",
-        isAdmin: isUserAdmin,
+        name: cleanText(data.deviceName, PROTOCOL_LIMITS.displayName) ?? 'Dispositivo remoto',
+        originalName: cleanText(data.originalName, PROTOCOL_LIMITS.displayName) ?? undefined,
+        deviceType: parseDeviceType(data.deviceType),
+        status: 'connected',
+        joinedAt: Date.now(),
+        isAdmin: hasValidAdminToken,
       };
+      room.peers.set(socket.id, peer);
 
-      room.peers.set(socket.id, peerInfo);
-
-      // Notify others in room that a new peer joined
-      socket.to(roomId).emit("peer-joined", {
-        peerId: socket.id,
-        peer: peerInfo,
-        totalPeers: room.peers.size,
-      });
-
-      // Send existing peers list to the newly joined peer
-      const existingPeers = Array.from(room.peers.values()).filter((p) => p.id !== socket.id);
-      socket.emit("room-joined", {
+      socket.to(roomId).emit('peer-joined', { peerId: socket.id, peer, totalPeers: room.peers.size });
+      socket.emit('room-joined', {
         roomId,
         peerId: socket.id,
-        isAdmin: isUserAdmin,
-        hasPin: !!room.pin,
-        pin: isUserAdmin ? room.pin : null,
-        existingPeers,
+        isAdmin: peer.isAdmin,
+        adminToken: peer.isAdmin ? adminToken : undefined,
+        hasPin: Boolean(room.pinCredential),
+        existingPeers: Array.from(room.peers.values()).filter((candidate) => candidate.id !== socket.id),
         totalPeers: room.peers.size,
       });
+
+      if (isNewRoom) socket.emit('room-created', { roomId });
     });
 
-    // Rename Device / Update Alias
-    socket.on("rename-device", (data: { roomId?: string; newName: string; originalName?: string }) => {
-      const roomId = (data.roomId || currentRoomId)?.toUpperCase();
-      if (!roomId) return;
-
-      const room = rooms.get(roomId);
-      if (!room) return;
-
+    socket.on('rename-device', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const newName = cleanText(data.newName, PROTOCOL_LIMITS.displayName);
+      if (!room || !newName) return;
       const peer = room.peers.get(socket.id);
-      if (peer) {
-        peer.name = data.newName;
-        if (data.originalName) peer.originalName = data.originalName;
-        io.to(roomId).emit("peer-renamed", {
-          peerId: socket.id,
-          name: data.newName,
-          originalName: peer.originalName,
-        });
-      }
+      if (!peer) return;
+      peer.name = newName;
+      peer.originalName = cleanText(data.originalName, PROTOCOL_LIMITS.displayName) ?? peer.originalName;
+      io.to(room.id).emit('peer-renamed', { peerId: socket.id, name: peer.name, originalName: peer.originalName });
     });
 
-    // Update Room Security / PIN (Admin only)
-    socket.on("update-room-security", (data: { roomId: string; pin?: string | null }) => {
-      const roomId = (data.roomId || currentRoomId)?.toUpperCase();
-      if (!roomId) return;
+    socket.on('update-room-security', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      if (!room || !room.socketAdminTokens.has(socket.id)) {
+        emitError(socket, 'No tienes permisos para cambiar la seguridad de la sala.');
+        return;
+      }
+      const pin = cleanText(data.pin, PROTOCOL_LIMITS.pin);
+      room.pinCredential = pin ? createPinCredential(pin) : null;
+      io.to(room.id).emit('room-security-updated', { roomId: room.id, hasPin: Boolean(pin) });
+    });
 
-      const room = rooms.get(roomId);
-      if (!room) return;
-
-      if (!room.adminSocketIds.has(socket.id)) {
-        socket.emit("error-message", { message: "No tienes permisos de administrador para cambiar la seguridad de la sala." });
+    socket.on('set-peer-admin', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      if (!room || !room.socketAdminTokens.has(socket.id) || !targetPeerId || !room.peers.has(targetPeerId)) {
+        emitError(socket, 'No se pudo actualizar el administrador solicitado.');
         return;
       }
 
-      const newPin = data.pin && String(data.pin).trim() ? String(data.pin).trim() : null;
-      room.pin = newPin;
-
-      // Broadcast security update to everyone in room
-      io.to(roomId).emit("room-security-updated", {
-        roomId,
-        hasPin: !!room.pin,
-        pin: newPin, // sent to participants for local state sync
-      });
-    });
-
-    // Set Peer Admin status (Admin only)
-    socket.on("set-peer-admin", (data: { roomId: string; targetPeerId: string; isAdmin: boolean }) => {
-      const roomId = (data.roomId || currentRoomId)?.toUpperCase();
-      if (!roomId) return;
-
-      const room = rooms.get(roomId);
-      if (!room) return;
-
-      if (!room.adminSocketIds.has(socket.id)) {
-        socket.emit("error-message", { message: "Solo los administradores pueden otorgar o revocar privilegios." });
-        return;
-      }
-
-      if (data.isAdmin) {
-        room.adminSocketIds.add(data.targetPeerId);
+      const isAdmin = data.isAdmin === true;
+      const targetPeer = room.peers.get(targetPeerId)!;
+      if (isAdmin) {
+        const token = room.socketAdminTokens.get(targetPeerId) ?? createAdminToken();
+        room.adminTokens.add(token);
+        room.socketAdminTokens.set(targetPeerId, token);
+        io.to(targetPeerId).emit('admin-token-issued', { roomId: room.id, adminToken: token });
       } else {
-        room.adminSocketIds.delete(data.targetPeerId);
-      }
-
-      const targetPeer = room.peers.get(data.targetPeerId);
-      if (targetPeer) {
-        targetPeer.isAdmin = data.isAdmin;
-      }
-
-      io.to(roomId).emit("room-admins-updated", {
-        roomId,
-        adminPeerIds: Array.from(room.adminSocketIds),
-        targetPeerId: data.targetPeerId,
-        isAdmin: data.isAdmin,
-      });
-    });
-
-    // WebRTC Signaling (Offers, Answers, ICE Candidates)
-    socket.on("signal", (data: { targetPeerId?: string; signal: any; roomId?: string }) => {
-      const roomId = data.roomId || currentRoomId;
-      if (!roomId) return;
-
-      if (data.targetPeerId) {
-        // Direct signaling to specific peer
-        io.to(data.targetPeerId).emit("signal", {
-          senderPeerId: socket.id,
-          signal: data.signal,
-        });
-      } else {
-        // Broadcast signal to other peers in room
-        socket.to(roomId).emit("signal", {
-          senderPeerId: socket.id,
-          signal: data.signal,
-        });
-      }
-    });
-
-    // File metadata notification
-    socket.on("file-meta", (data: { roomId: string; fileMeta: any; targetPeerId?: string }) => {
-      const roomId = data.roomId || currentRoomId;
-      if (!roomId) return;
-
-      if (data.targetPeerId) {
-        io.to(data.targetPeerId).emit("file-meta", {
-          senderPeerId: socket.id,
-          fileMeta: data.fileMeta,
-        });
-      } else {
-        socket.to(roomId).emit("file-meta", {
-          senderPeerId: socket.id,
-          fileMeta: data.fileMeta,
-        });
-      }
-    });
-
-    // Fallback socket direct chunk streaming (if WebRTC P2P fails due to restrictive firewall)
-    socket.on("file-chunk-fallback", (data: { roomId: string; chunk: any; chunkIndex: number; totalChunks: number; fileId: string }) => {
-      socket.to(data.roomId).emit("file-chunk-fallback", {
-        senderPeerId: socket.id,
-        chunk: data.chunk,
-        chunkIndex: data.chunkIndex,
-        totalChunks: data.totalChunks,
-        fileId: data.fileId,
-      });
-    });
-
-    // Instant Text Transfer
-    socket.on("share-text", (data: { roomId: string; text: string; senderName?: string }) => {
-      const roomId = data.roomId || currentRoomId;
-      if (!roomId) return;
-      socket.to(roomId).emit("text-received", {
-        senderPeerId: socket.id,
-        senderName: data.senderName || "Dispositivo",
-        text: data.text,
-        timestamp: Date.now(),
-      });
-    });
-
-    socket.on("share-chat", (data: { roomId: string; text: string; senderName?: string }) => {
-      const roomId = data.roomId || currentRoomId;
-      if (!roomId) return;
-      socket.to(roomId).emit("chat-received", {
-        senderPeerId: socket.id,
-        senderName: data.senderName || "Dispositivo",
-        text: data.text,
-        timestamp: Date.now(),
-      });
-    });
-
-    // Disconnect handling
-    socket.on("disconnect", () => {
-      if (currentRoomId && rooms.has(currentRoomId)) {
-        const room = rooms.get(currentRoomId)!;
-        room.peers.delete(socket.id);
-
-        io.to(currentRoomId).emit("peer-left", {
-          peerId: socket.id,
-          totalPeers: room.peers.size,
-        });
-
-        if (room.peers.size === 0) {
-          // Clean up empty room after 10 minutes
-          setTimeout(() => {
-            const r = rooms.get(currentRoomId!);
-            if (r && r.peers.size === 0) {
-              rooms.delete(currentRoomId!);
-            }
-          }, 600000);
+        const activeAdmins = Array.from(room.peers.keys()).filter((peerId) => room.socketAdminTokens.has(peerId));
+        if (activeAdmins.length === 1 && activeAdmins[0] === targetPeerId) {
+          emitError(socket, 'La sala debe conservar al menos un administrador activo.');
+          return;
         }
+        const token = room.socketAdminTokens.get(targetPeerId);
+        if (token) room.adminTokens.delete(token);
+        room.socketAdminTokens.delete(targetPeerId);
+        io.to(targetPeerId).emit('admin-token-revoked', { roomId: room.id });
       }
+      targetPeer.isAdmin = isAdmin;
+      io.to(room.id).emit('room-admins-updated', {
+        roomId: room.id,
+        adminPeerIds: Array.from(room.socketAdminTokens.keys()),
+        targetPeerId,
+        isAdmin,
+      });
     });
+
+    socket.on('signal', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      if (!room || !targetPeerId || !room.peers.has(targetPeerId) || !data.signal) return;
+      io.to(targetPeerId).emit('signal', { senderPeerId: socket.id, signal: data.signal });
+    });
+
+    socket.on('file-meta', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      const fileMeta = parseFileMeta(data.fileMeta);
+      if (!room || !targetPeerId || !room.peers.has(targetPeerId) || !fileMeta) return;
+      io.to(targetPeerId).emit('file-meta', { senderPeerId: socket.id, fileMeta });
+    });
+
+    socket.on('offer-files', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      const parsedFiles = Array.isArray(data.files) ? data.files.slice(0, 50).map(parseFileMeta) : [];
+      if (!room || !targetPeerId || !room.peers.has(targetPeerId) || parsedFiles.length === 0 || parsedFiles.some((file) => !file)) return;
+      const files = parsedFiles as FileMetaPayload[];
+      io.to(targetPeerId).emit('files-offered', {
+        senderPeerId: socket.id,
+        senderName: cleanText(data.senderName, PROTOCOL_LIMITS.displayName) ?? 'Dispositivo',
+        files,
+      });
+    });
+
+    socket.on('request-file', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      const fileId = cleanText(data.fileId, PROTOCOL_LIMITS.fileId);
+      if (!room || !targetPeerId || !room.peers.has(targetPeerId) || !fileId) return;
+      io.to(targetPeerId).emit('file-requested', { requesterPeerId: socket.id, fileId });
+    });
+
+    socket.on('file-chunk-fallback', (rawData: unknown) => {
+      const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+      const room = getCurrentRoom(data.roomId);
+      const targetPeerId = cleanText(data.targetPeerId, 128);
+      const fileId = cleanText(data.fileId, PROTOCOL_LIMITS.fileId);
+      if (!room || !targetPeerId || !room.peers.has(targetPeerId) || !fileId || !data.chunk) return;
+      io.to(targetPeerId).emit('file-chunk-fallback', { senderPeerId: socket.id, chunk: data.chunk, fileId });
+    });
+
+    const relayText = (incomingEvent: 'share-text' | 'share-chat', outgoingEvent: 'text-received' | 'chat-received') => {
+      socket.on(incomingEvent, (rawData: unknown) => {
+        const data = rawData && typeof rawData === 'object' ? rawData as Record<string, unknown> : {};
+        const room = getCurrentRoom(data.roomId);
+        const text = cleanText(data.text, PROTOCOL_LIMITS.text);
+        if (!room || !text) return;
+        const targetPeerId = cleanText(data.targetPeerId, 128);
+        if (data.targetPeerId !== undefined && (!targetPeerId || !room.peers.has(targetPeerId))) return;
+        const destination = targetPeerId && room.peers.has(targetPeerId) ? io.to(targetPeerId) : socket.to(room.id);
+        destination.emit(outgoingEvent, {
+          senderPeerId: socket.id,
+          senderName: cleanText(data.senderName, PROTOCOL_LIMITS.displayName) ?? 'Dispositivo',
+          text,
+          timestamp: Date.now(),
+          messageId: randomUUID(),
+        });
+      });
+    };
+
+    relayText('share-text', 'text-received');
+    relayText('share-chat', 'chat-received');
+    socket.on('disconnect', leaveCurrentRoom);
   });
 
-  // Vite development server setup or Production Static server
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    const distPath = path.join(process.cwd(), 'dist');
+    app.use(express.static(distPath, { maxAge: '1h' }));
+    app.get('*', (_request, response) => response.sendFile(path.join(distPath, 'index.html')));
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 QR Drop Server active on http://0.0.0.0:${PORT}`);
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`DropThing signaling server listening on http://0.0.0.0:${port}`);
   });
 }
 
-startServer();
+startServer().catch((error: unknown) => {
+  console.error('DropThing failed to start.', error);
+  process.exitCode = 1;
+});

@@ -79,7 +79,7 @@ export const QRDisplayModal: React.FC<QRDisplayModalProps> = ({
     if (!qrDataUrl) return;
     const a = document.createElement('a');
     a.href = qrDataUrl;
-    a.download = `qrdrop-sala-${roomId}.png`;
+    a.download = `dropthing-room-${roomId}.png`;
     a.click();
   };
 

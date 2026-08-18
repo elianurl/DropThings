@@ -15,6 +15,7 @@ import {
   Sparkles,
   Layers,
 } from 'lucide-react';
+import { BRAND } from '../config/brand';
 
 interface LandingRoomsViewProps {
   savedRooms: SavedRoom[];
@@ -51,14 +52,14 @@ export const LandingRoomsView: React.FC<LandingRoomsViewProps> = ({
       <div className="text-center mb-6 sm:mb-8">
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold mb-3 shadow-[0_0_15px_rgba(6,182,212,0.15)]">
           <ShieldCheck className="w-3.5 h-3.5" />
-          <span>Transferencia P2P Directa y Cifrada</span>
+          <span>{BRAND.name} · P2P directo y cifrado</span>
         </div>
 
         <h2 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight mb-2.5">
-          Conéctate y comparte al instante
+          {BRAND.tagline}
         </h2>
         <p className="text-xs sm:text-base text-slate-400 max-w-lg mx-auto leading-relaxed px-2">
-          Transfiere archivos y textos a velocidad de red local directa mediante WebRTC seguro sin límites de tamaño.
+          Comparte archivos y mensajes directamente entre dispositivos mediante WebRTC, sin subirlos a la nube.
         </p>
       </div>
 
@@ -213,7 +214,7 @@ export const LandingRoomsView: React.FC<LandingRoomsViewProps> = ({
                       <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-400">
                         <span className="flex items-center gap-1 truncate">
                           <Clock className="w-3 h-3 text-slate-500 shrink-0" />
-                          {new Date(room.lastVisited).toLocaleDateString()}
+                          {new Date(room.lastActive).toLocaleDateString()}
                         </span>
                         {room.messages && room.messages.length > 0 && (
                           <span className="flex items-center gap-1 text-slate-400">

@@ -7,21 +7,34 @@ export interface SavedRoom {
   lastActive: number;
   isCreator: boolean;
   isAdmin?: boolean;
+  adminToken?: string;
   creatorDeviceId?: string;
   pin?: string | null;
   adminDeviceNames?: string[];
   messages: TextShareItem[];
 }
 
-const ROOMS_KEY = 'qrdrop_saved_rooms_v2';
-const ACTIVE_ROOM_KEY = 'qrdrop_active_room_id_v2';
+const ROOMS_KEY = 'dropthing.savedRooms.v1';
+const LEGACY_ROOMS_KEY = 'qrdrop_saved_rooms_v2';
+
+function readStoredRooms(): string | null {
+  const current = localStorage.getItem(ROOMS_KEY);
+  if (current) return current;
+
+  const legacy = localStorage.getItem(LEGACY_ROOMS_KEY);
+  if (legacy) {
+    localStorage.setItem(ROOMS_KEY, legacy);
+    localStorage.removeItem(LEGACY_ROOMS_KEY);
+  }
+  return legacy;
+}
 
 export function getSavedRooms(): SavedRoom[] {
   try {
-    const data = localStorage.getItem(ROOMS_KEY);
+    const data = readStoredRooms();
     if (!data) return [];
-    const parsed: SavedRoom[] = JSON.parse(data);
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed: unknown = JSON.parse(data);
+    return Array.isArray(parsed) ? (parsed as SavedRoom[]) : [];
   } catch (err) {
     console.error('Error reading saved rooms from storage:', err);
     return [];
@@ -47,6 +60,7 @@ export function upsertSavedRoom(
     isCreator?: boolean;
     isAdmin?: boolean;
     creatorDeviceId?: string;
+    adminToken?: string;
     name?: string;
     pin?: string | null;
   } = {}
@@ -65,6 +79,7 @@ export function upsertSavedRoom(
       isCreator: options.isCreator !== undefined ? options.isCreator : existing.isCreator,
       isAdmin: options.isAdmin !== undefined ? options.isAdmin : (existing.isAdmin || (options.isCreator ?? existing.isCreator)),
       creatorDeviceId: options.creatorDeviceId || existing.creatorDeviceId,
+      adminToken: options.adminToken || existing.adminToken,
       name: options.name || existing.name,
       pin: options.pin !== undefined ? options.pin : existing.pin,
     };
@@ -83,6 +98,7 @@ export function upsertSavedRoom(
       isCreator,
       isAdmin: options.isAdmin !== undefined ? options.isAdmin : isCreator,
       creatorDeviceId: options.creatorDeviceId,
+      adminToken: options.adminToken,
       pin: options.pin || null,
       messages: [],
     };
@@ -116,6 +132,32 @@ export function setRoomAdmin(roomId: string, isAdmin: boolean): SavedRoom | unde
     return room;
   }
   return undefined;
+}
+
+export function setRoomAdminToken(roomId: string, adminToken: string): SavedRoom | undefined {
+  const rooms = getSavedRooms();
+  const normalizedId = roomId.toUpperCase();
+  const room = rooms.find((candidate) => candidate.id === normalizedId);
+  if (!room) return undefined;
+
+  room.adminToken = adminToken;
+  room.isAdmin = true;
+  room.lastActive = Date.now();
+  saveRooms(rooms);
+  return room;
+}
+
+export function clearRoomAdminToken(roomId: string): SavedRoom | undefined {
+  const rooms = getSavedRooms();
+  const normalizedId = roomId.toUpperCase();
+  const room = rooms.find((candidate) => candidate.id === normalizedId);
+  if (!room) return undefined;
+
+  delete room.adminToken;
+  room.isAdmin = false;
+  room.lastActive = Date.now();
+  saveRooms(rooms);
+  return room;
 }
 
 export function saveRoomMessages(roomId: string, messages: TextShareItem[]): void {

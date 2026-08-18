@@ -1,9 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Toaster, sileo } from 'sileo';
 import { Header } from './components/Header';
-import { QRDisplayModal } from './components/QRDisplayModal';
-import { QRCameraScannerModal } from './components/QRCameraScannerModal';
-import { RoomPinModal } from './components/RoomPinModal';
 import { FileTransferZone } from './components/FileTransferZone';
 import { ActiveTransfersList } from './components/ActiveTransfersList';
 import { RoomChatDrawer } from './components/RoomChatDrawer';
@@ -11,7 +8,7 @@ import { FloatingChatButton } from './components/FloatingChatButton';
 import { HistorySection } from './components/HistorySection';
 import { LandingRoomsView } from './components/LandingRoomsView';
 
-import { PeerDevice, TextShareItem, TransferHistoryItem, TransferItem } from './types';
+import { OfferedFile, PeerDevice, TextShareItem, TransferHistoryItem, TransferItem } from './types';
 import { detectDeviceName, generateRoomId } from './utils/formatters';
 import { addHistoryItem, clearHistory, deleteHistoryItem, getHistory } from './utils/storage';
 import {
@@ -22,19 +19,35 @@ import {
   deleteSavedRoom,
   setRoomPin as persistRoomPin,
   setRoomAdmin as persistRoomAdmin,
+  setRoomAdminToken,
+  clearRoomAdminToken,
   SavedRoom,
 } from './utils/roomsStorage';
 import { WebRTCManager } from './utils/webrtcManager';
 import { playChatNotificationSound } from './utils/audioNotify';
 
-import { Shield, Zap, QrCode, Lock, Radio } from 'lucide-react';
+import { Shield, Zap, Radio } from 'lucide-react';
+import { normalizeRoomId } from '../shared/protocol';
+
+const QRDisplayModal = lazy(() =>
+  import('./components/QRDisplayModal').then((module) => ({ default: module.QRDisplayModal }))
+);
+const QRCameraScannerModal = lazy(() =>
+  import('./components/QRCameraScannerModal').then((module) => ({ default: module.QRCameraScannerModal }))
+);
+const RoomPinModal = lazy(() =>
+  import('./components/RoomPinModal').then((module) => ({ default: module.RoomPinModal }))
+);
+
+function getRoomIdFromHash(): string | null {
+  const match = window.location.hash.match(/#room=([^&]+)/i);
+  return normalizeRoomId(match?.[1]);
+}
 
 export default function App() {
   const [roomId, setRoomId] = useState<string | null>(() => {
     // Check if URL hash has #room=CODE
-    const hash = window.location.hash;
-    const match = hash.match(/#room=([A-Z0-9]+)/i);
-    return match ? match[1].toUpperCase() : null;
+    return getRoomIdFromHash();
   });
 
   const [savedRooms, setSavedRooms] = useState<SavedRoom[]>(() => getSavedRooms());
@@ -53,15 +66,13 @@ export default function App() {
   const [activeTransfers, setActiveTransfers] = useState<TransferItem[]>([]);
   
   const [textItems, setTextItems] = useState<TextShareItem[]>(() => {
-    const hash = window.location.hash;
-    const match = hash.match(/#room=([A-Z0-9]+)/i);
-    const initialId = match ? match[1].toUpperCase() : undefined;
+    const initialId = getRoomIdFromHash() ?? undefined;
     const initialRoom = initialId ? getSavedRooms().find((r) => r.id === initialId) : undefined;
     return initialRoom?.messages || [];
   });
 
   const [history, setHistory] = useState<TransferHistoryItem[]>(() => getHistory());
-  const [offeredFiles, setOfferedFiles] = useState<any[]>([]);
+  const [offeredFiles, setOfferedFiles] = useState<OfferedFile[]>([]);
 
   // Room Chat State
   const [isChatOpen, setIsChatOpen] = useState(false);
@@ -86,7 +97,7 @@ export default function App() {
       return;
     }
     const isUrlRoom = window.location.hash.includes('room=');
-    const existing = savedRooms.find((r) => r.id.toUpperCase() === roomId.toUpperCase());
+    const existing = getSavedRooms().find((r) => r.id.toUpperCase() === roomId.toUpperCase());
     const room = upsertSavedRoom(roomId, {
       isCreator: existing ? existing.isCreator : !isUrlRoom,
       creatorDeviceId: deviceInfo.name,
@@ -98,14 +109,11 @@ export default function App() {
     if (room?.pin) {
       setRoomPin(room.pin);
     }
-    if (room?.isAdmin || room?.isCreator) {
-      setIsAdmin(true);
-    }
+    setIsAdmin(Boolean(room?.adminToken));
   }, [roomId]);
 
   const localFilesRef = useRef<Map<string, File>>(new Map());
 
-  const [darkMode, setDarkMode] = useState(true);
   const [qrModalOpen, setQrModalOpen] = useState(false);
   const [scannerModalOpen, setScannerModalOpen] = useState(false);
   const [offlinePayload, setOfflinePayload] = useState<string | null>(null);
@@ -122,10 +130,9 @@ export default function App() {
     // Sync URL hash
     window.location.hash = `#room=${roomId}`;
 
-    // Get current room from storage if has saved PIN or isCreator
-    const currentSaved = savedRooms.find((r) => r.id.toUpperCase() === roomId.toUpperCase());
+    // Get the current room's persisted access credentials.
+    const currentSaved = getSavedRooms().find((r) => r.id.toUpperCase() === roomId.toUpperCase());
     const initialPin = currentSaved?.pin || roomPin;
-    const isCreator = !!currentSaved?.isCreator;
 
     // Initialize WebRTC Manager
     const manager = new WebRTCManager({
@@ -134,6 +141,12 @@ export default function App() {
       },
       onJoinFailed: (reason, message, targetRoomId) => {
         setIsConnected(false);
+        if (reason === 'INVALID_ROOM') {
+          sileo.error({ title: message });
+          setRoomId(null);
+          window.location.hash = '';
+          return;
+        }
         setPendingPinRoomId(targetRoomId);
         setPinModalError(
           reason === 'INVALID_PIN'
@@ -143,12 +156,17 @@ export default function App() {
         setPinModalLoading(false);
         setPinModalOpen(true);
       },
-      onRoomJoined: (joinedRoomId, myPeerId, existingPeers, isAdminUser, hasPin, pin) => {
+      onRoomJoined: (joinedRoomId, _myPeerId, existingPeers, isAdminUser, hasPin, adminToken) => {
         setPeers(existingPeers);
         setIsAdmin(!!isAdminUser);
-        if (pin !== undefined) {
-          setRoomPin(pin);
-          persistRoomPin(joinedRoomId, pin);
+        if (adminToken) {
+          setRoomAdminToken(joinedRoomId, adminToken);
+        } else if (!isAdminUser) {
+          clearRoomAdminToken(joinedRoomId);
+        }
+        if (!hasPin) {
+          setRoomPin(null);
+          persistRoomPin(joinedRoomId, null);
         }
         persistRoomAdmin(joinedRoomId, !!isAdminUser);
         setSavedRooms(getSavedRooms());
@@ -156,20 +174,29 @@ export default function App() {
         setPinModalLoading(false);
         setPinModalError(null);
       },
-      onRoomSecurityUpdated: (hasPin, pin) => {
-        const cleanPin = pin || null;
-        setRoomPin(cleanPin);
-        if (roomId) {
-          persistRoomPin(roomId, cleanPin);
-          setSavedRooms(getSavedRooms());
+      onRoomSecurityUpdated: (hasPin) => {
+        if (!hasPin) {
+          setRoomPin(null);
+          if (roomId) persistRoomPin(roomId, null);
         }
-        if (hasPin && cleanPin) {
+        setSavedRooms(getSavedRooms());
+        if (hasPin) {
           sileo.info({ title: `Seguridad de la sala actualizada: PIN activado` });
         } else {
           sileo.info({ title: `PIN de la sala desactivado (Acceso libre)` });
         }
       },
-      onRoomAdminsUpdated: (adminPeerIds, targetPeerId, targetIsAdmin) => {
+      onAdminTokenIssued: (targetRoomId, adminToken) => {
+        setRoomAdminToken(targetRoomId, adminToken);
+        setIsAdmin(true);
+        setSavedRooms(getSavedRooms());
+      },
+      onAdminTokenRevoked: (targetRoomId) => {
+        clearRoomAdminToken(targetRoomId);
+        setIsAdmin(false);
+        setSavedRooms(getSavedRooms());
+      },
+      onRoomAdminsUpdated: (_adminPeerIds, targetPeerId, targetIsAdmin) => {
         // Update peers list
         setPeers((prev) =>
           prev.map((p) => (p.id === targetPeerId ? { ...p, isAdmin: targetIsAdmin } : p))
@@ -278,7 +305,7 @@ export default function App() {
       },
       onTextReceived: (text, senderName, timestamp) => {
         const newText: TextShareItem = {
-          id: `txt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          id: `txt-${crypto.randomUUID()}`,
           text,
           senderName,
           timestamp,
@@ -315,7 +342,7 @@ export default function App() {
       },
       onChatReceived: (text, senderName, timestamp) => {
         const newText: TextShareItem = {
-          id: `txt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          id: `txt-${crypto.randomUUID()}`,
           text,
           senderName,
           timestamp,
@@ -336,8 +363,8 @@ export default function App() {
       },
       onFilesOffered: (filesMeta, senderPeerId, senderName) => {
         setOfferedFiles((prev) => {
-          const newOffers = filesMeta.map((m: any) => ({
-            ...m,
+          const newOffers: OfferedFile[] = filesMeta.map((fileMeta) => ({
+            ...fileMeta,
             senderPeerId,
             senderName,
           }));
@@ -354,7 +381,7 @@ export default function App() {
     });
 
     rtcManagerRef.current = manager;
-    manager.connect(roomId, deviceInfo.name, deviceInfo.type, initialPin, isCreator, deviceInfo.originalName);
+    manager.connect(roomId, deviceInfo.name, deviceInfo.type, initialPin, currentSaved?.adminToken, deviceInfo.originalName);
 
     return () => {
       manager.disconnect();
@@ -366,8 +393,10 @@ export default function App() {
     if (!trimmed) return;
     setDeviceInfo((prev) => {
       try {
-        localStorage.setItem('qrdrop_device_alias', trimmed);
-      } catch (e) {}
+        localStorage.setItem('dropthing.deviceAlias', trimmed);
+      } catch {
+        // Device aliases are optional when browser storage is unavailable.
+      }
       return { ...prev, name: trimmed };
     });
     if (rtcManagerRef.current) {
@@ -413,7 +442,8 @@ export default function App() {
     setSavedRooms(getSavedRooms());
 
     if (rtcManagerRef.current) {
-      rtcManagerRef.current.connect(target, deviceInfo.name, deviceInfo.type, enteredPin, false);
+      const adminToken = getSavedRooms().find((room) => room.id === target.toUpperCase())?.adminToken;
+      rtcManagerRef.current.connect(target, deviceInfo.name, deviceInfo.type, enteredPin, adminToken, deviceInfo.originalName);
     }
   };
 
@@ -443,8 +473,11 @@ export default function App() {
   };
 
   const handleSwitchRoom = (newRoomId: string) => {
-    const clean = newRoomId.trim().toUpperCase();
-    if (!clean) return;
+    const clean = normalizeRoomId(newRoomId);
+    if (!clean) {
+      sileo.error({ title: 'El código de sala no es válido.' });
+      return;
+    }
     const targetRoom = upsertSavedRoom(clean, { isCreator: false });
     setRoomId(clean);
     setTextItems(targetRoom.messages || []);
@@ -468,10 +501,6 @@ export default function App() {
     sileo.success({ title: `Nueva sala creada: ${newRoom}` });
   };
 
-  const handleJoinRoom = (targetRoomId: string) => {
-    handleSwitchRoom(targetRoomId);
-  };
-
   const handleDeleteRoom = (targetRoomId: string) => {
     const upper = targetRoomId.toUpperCase();
     const remaining = deleteSavedRoom(upper);
@@ -487,7 +516,7 @@ export default function App() {
     if (!rtcManagerRef.current) return;
 
     const filesMeta = files.map((file) => {
-      const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+      const fileId = `file-${crypto.randomUUID()}`;
       localFilesRef.current.set(fileId, file);
       return {
         id: fileId,
@@ -497,8 +526,11 @@ export default function App() {
       };
     });
 
-    rtcManagerRef.current.offerFiles(filesMeta);
-    sileo.success({ title: 'Archivos precargados en la sala', description: 'Los otros dispositivos ahora pueden descargarlos.' });
+    if (rtcManagerRef.current.offerFiles(filesMeta)) {
+      sileo.success({ title: 'Archivos precargados en la sala', description: 'Los otros dispositivos ahora pueden descargarlos.' });
+    } else {
+      sileo.error({ title: 'No hay otros dispositivos conectados para recibir la oferta.' });
+    }
   };
 
   const startActualFileTransfer = (fileId: string, peerId: string) => {
@@ -526,6 +558,7 @@ export default function App() {
     rtcManagerRef.current?.sendFile(
       file,
       fileId,
+      peerId,
       (progress, bytesSent, speed, eta) => {
         setActiveTransfers((prev) =>
           prev.map((t) =>
@@ -579,7 +612,7 @@ export default function App() {
     rtcManagerRef.current.sendChat(text, alias);
 
     const newTextItem: TextShareItem = {
-      id: `txt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      id: `txt-${crypto.randomUUID()}`,
       text,
       senderName: alias || deviceInfo.name,
       timestamp: Date.now(),
@@ -587,7 +620,7 @@ export default function App() {
     };
 
     setTextItems((prev) => [...prev, newTextItem]);
-    appendRoomMessage(roomId, newTextItem);
+    if (roomId) appendRoomMessage(roomId, newTextItem);
     setSavedRooms(getSavedRooms());
 
     // Save to history
@@ -611,15 +644,20 @@ export default function App() {
     if (scannedText.startsWith('OFFLINE_RESULT:')) {
       const data = scannedText.substring(15);
       try {
-        const parsed = JSON.parse(data);
-        const processFile = (fileObj: any) => {
-           if (fileObj.t && fileObj.n && fileObj.d) {
-             fetch(`data:${fileObj.t};base64,${fileObj.d}`).then(r => r.blob()).then(blob => {
+        const parsed: unknown = JSON.parse(data);
+        const processFile = (value: unknown) => {
+           if (!value || typeof value !== 'object') return;
+           const fileObj = value as Record<string, unknown>;
+           if (typeof fileObj.t === 'string' && typeof fileObj.n === 'string' && typeof fileObj.d === 'string') {
+             const fileType = fileObj.t;
+             const fileName = fileObj.n;
+             const fileData = fileObj.d;
+             fetch(`data:${fileType};base64,${fileData}`).then(r => r.blob()).then(blob => {
                const blobUrl = URL.createObjectURL(blob);
                const histItem = addHistoryItem({
-                 name: fileObj.n,
+                 name: fileName,
                  size: blob.size,
-                 type: fileObj.t,
+                 type: fileType,
                  direction: 'received',
                  speed: 0,
                  timeTaken: 0,
@@ -628,10 +666,10 @@ export default function App() {
                  blobUrl,
                });
                setHistory((prev) => [histItem, ...prev]);
-               sileo.success({ title: `Archivo offline recibido: ${fileObj.n}` });
+               sileo.success({ title: `Archivo offline recibido: ${fileName}` });
                const a = document.createElement('a');
                a.href = blobUrl;
-               a.download = fileObj.n;
+               a.download = fileName;
                a.click();
              });
            }
@@ -639,7 +677,7 @@ export default function App() {
 
         if (Array.isArray(parsed)) {
            parsed.forEach(processFile);
-        } else if (parsed.t && parsed.n && parsed.d) {
+        } else if (parsed && typeof parsed === 'object' && 't' in parsed && 'n' in parsed && 'd' in parsed) {
            processFile(parsed);
         } else {
            throw new Error('Not a file object');
@@ -648,14 +686,14 @@ export default function App() {
       } catch {
         // Just text
         const newTextItem: TextShareItem = {
-          id: `txt-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+          id: `txt-${crypto.randomUUID()}`,
           text: data,
           senderName: 'Dispositivo Offline (QR)',
           timestamp: Date.now(),
           direction: 'received',
         };
         setTextItems((prev) => [...prev, newTextItem]);
-        appendRoomMessage(roomId, newTextItem);
+        if (roomId) appendRoomMessage(roomId, newTextItem);
         setSavedRooms(getSavedRooms());
         
         const histItem = addHistoryItem({
@@ -676,14 +714,16 @@ export default function App() {
       return;
     }
 
-    const match = scannedText.match(/#room=([A-Z0-9]+)/i);
-    if (match) {
-      const newRoom = match[1].toUpperCase();
+    const match = scannedText.match(/#room=([^&]+)/i);
+    const scannedRoomId = normalizeRoomId(match?.[1]);
+    if (scannedRoomId) {
+      const newRoom = scannedRoomId;
       handleSwitchRoom(newRoom);
       sileo.success({ title: `Te has unido a la sala: ${newRoom}` });
-    } else if (/^[A-Z0-9]{3,10}(-[A-Z0-9]{3,10})?$/i.test(scannedText.trim())) {
-      handleSwitchRoom(scannedText.trim());
-      sileo.success({ title: `Te has unido a la sala: ${scannedText.trim().toUpperCase()}` });
+    } else if (normalizeRoomId(scannedText)) {
+      const newRoom = normalizeRoomId(scannedText)!;
+      handleSwitchRoom(newRoom);
+      sileo.success({ title: `Te has unido a la sala: ${newRoom}` });
     } else {
       // Scanned custom text/URL
       navigator.clipboard.writeText(scannedText);
@@ -738,8 +778,8 @@ export default function App() {
   };
 
   return (
-    <div className={`min-h-screen ${darkMode ? 'bg-immersive-radial text-slate-100' : 'bg-slate-900 text-slate-100'} transition-colors duration-300 font-sans pb-20`}>
-      <Toaster theme={darkMode ? "dark" : "light"} />
+    <div className="min-h-screen bg-immersive-radial text-slate-100 transition-colors duration-300 font-sans pb-20">
+      <Toaster theme="dark" />
       {/* App Top Bar */}
       <Header
         roomId={roomId}
@@ -753,18 +793,13 @@ export default function App() {
         roomPin={roomPin}
         onUpdatePin={handleUpdateRoomPin}
         onSetPeerAdmin={handleSetPeerAdmin}
-        darkMode={darkMode}
-        onToggleDarkMode={() => setDarkMode(!darkMode)}
         onOpenQRModal={() => {
           setOfflinePayload(null);
           setQrModalOpen(true);
         }}
         onOpenScannerModal={() => setScannerModalOpen(true)}
         onRenameDevice={handleRenameDevice}
-        onSwitchRoom={handleSwitchRoom}
         onCreateNewRoom={handleCreateNewRoom}
-        onJoinRoom={handleJoinRoom}
-        onDeleteRoom={handleDeleteRoom}
         onLeaveRoom={handleLeaveRoom}
       />
 
@@ -807,9 +842,13 @@ export default function App() {
                       <button
                         onClick={() => {
                           if (rtcManagerRef.current) {
-                            rtcManagerRef.current.requestFile(file.id, file.senderPeerId);
-                            setOfferedFiles((prev) => prev.filter(f => f.id !== file.id));
-                            sileo.info({ title: 'Descarga solicitada', description: `Solicitando ${file.name} a ${file.senderName}...` });
+                            const requested = rtcManagerRef.current.requestFile(file.id, file.senderPeerId);
+                            if (requested) {
+                              setOfferedFiles((prev) => prev.filter(f => f.id !== file.id));
+                              sileo.info({ title: 'Descarga solicitada', description: `Solicitando ${file.name} a ${file.senderName}...` });
+                            } else {
+                              sileo.error({ title: 'El dispositivo que ofreció el archivo ya no está disponible.' });
+                            }
                           }
                         }}
                         className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-xl text-xs font-bold border border-emerald-500/30 transition-all"
@@ -850,7 +889,7 @@ export default function App() {
             </span>
             <span className="hidden md:inline text-slate-600">|</span>
             <span className="hidden md:flex items-center gap-1 text-slate-400">
-              <Shield className="w-3 h-3 text-emerald-400" /> Cifrado de Extremo a Extremo
+              <Shield className="w-3 h-3 text-emerald-400" /> Canal WebRTC cifrado
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -896,37 +935,47 @@ export default function App() {
       )}
 
       {/* QR Connection Modal (Only when inside active room) */}
-      {roomId && (
-        <QRDisplayModal
-          isOpen={qrModalOpen}
-          onClose={() => {
-            setQrModalOpen(false);
-            setTimeout(() => setOfflinePayload(null), 300);
-          }}
-          roomId={roomId}
-          onRefreshRoomId={handleRefreshRoom}
-          peerCount={peers.length}
-          offlinePayload={offlinePayload}
-          pin={roomPin}
-        />
+      {roomId && qrModalOpen && (
+        <Suspense fallback={null}>
+          <QRDisplayModal
+            isOpen
+            onClose={() => {
+              setQrModalOpen(false);
+              setTimeout(() => setOfflinePayload(null), 300);
+            }}
+            roomId={roomId}
+            onRefreshRoomId={handleRefreshRoom}
+            peerCount={peers.length}
+            offlinePayload={offlinePayload}
+            pin={roomPin}
+          />
+        </Suspense>
       )}
 
       {/* PIN Access Verification Modal for locked rooms */}
-      <RoomPinModal
-        isOpen={pinModalOpen}
-        onClose={handleClosePinModal}
-        roomId={pendingPinRoomId || roomId || ''}
-        onSubmitPin={handlePinSubmit}
-        errorMessage={pinModalError}
-        isLoading={pinModalLoading}
-      />
+      {pinModalOpen && (
+        <Suspense fallback={null}>
+          <RoomPinModal
+            isOpen
+            onClose={handleClosePinModal}
+            roomId={pendingPinRoomId || roomId || ''}
+            onSubmitPin={handlePinSubmit}
+            errorMessage={pinModalError}
+            isLoading={pinModalLoading}
+          />
+        </Suspense>
+      )}
 
       {/* QR Camera Scanner Modal */}
-      <QRCameraScannerModal
-        isOpen={scannerModalOpen}
-        onClose={() => setScannerModalOpen(false)}
-        onScanResult={handleScanResult}
-      />
+      {scannerModalOpen && (
+        <Suspense fallback={null}>
+          <QRCameraScannerModal
+            isOpen
+            onClose={() => setScannerModalOpen(false)}
+            onScanResult={handleScanResult}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

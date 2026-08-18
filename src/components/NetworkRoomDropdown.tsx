@@ -175,7 +175,7 @@ export const NetworkRoomDropdown: React.FC<NetworkRoomDropdownProps> = ({
   };
 
   const currentSavedRoom = savedRooms?.find((r) => r.id.toUpperCase() === roomId.toUpperCase());
-  const effectiveIsAdmin = isAdmin || !!currentSavedRoom?.isCreator || !!currentSavedRoom?.isAdmin;
+  const effectiveIsAdmin = isAdmin;
 
   return (
     <div className="relative" ref={dropdownRef}>

@@ -1,11 +1,26 @@
 import { TransferHistoryItem } from '../types';
 
-const HISTORY_KEY = 'qrdrop_transfer_history_v1';
+const HISTORY_KEY = 'dropthing.transferHistory.v1';
+const LEGACY_HISTORY_KEY = 'qrdrop_transfer_history_v1';
+
+function readStoredHistory(): string | null {
+  const current = localStorage.getItem(HISTORY_KEY);
+  if (current) return current;
+
+  const legacy = localStorage.getItem(LEGACY_HISTORY_KEY);
+  if (legacy) {
+    localStorage.setItem(HISTORY_KEY, legacy);
+    localStorage.removeItem(LEGACY_HISTORY_KEY);
+  }
+  return legacy;
+}
 
 export function getHistory(): TransferHistoryItem[] {
   try {
-    const data = localStorage.getItem(HISTORY_KEY);
-    return data ? JSON.parse(data) : [];
+    const data = readStoredHistory();
+    if (!data) return [];
+    const parsed: unknown = JSON.parse(data);
+    return Array.isArray(parsed) ? (parsed as TransferHistoryItem[]) : [];
   } catch (err) {
     console.error('Error reading history from storage:', err);
     return [];
@@ -15,7 +30,7 @@ export function getHistory(): TransferHistoryItem[] {
 export function saveHistory(history: TransferHistoryItem[]): void {
   try {
     // Keep max 100 history entries to avoid hitting localStorage limit
-    const trimmed = history.slice(0, 100);
+    const trimmed = history.slice(0, 100).map(({ blobUrl: _blobUrl, ...item }) => item);
     localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
   } catch (err) {
     console.error('Error saving history to storage:', err);
@@ -26,7 +41,7 @@ export function addHistoryItem(item: Omit<TransferHistoryItem, 'id'>): TransferH
   const history = getHistory();
   const newItem: TransferHistoryItem = {
     ...item,
-    id: `hist-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+    id: `hist-${crypto.randomUUID()}`,
   };
   history.unshift(newItem);
   saveHistory(history);

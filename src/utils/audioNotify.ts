@@ -1,7 +1,8 @@
 // Web Audio API lightweight futuristic notification chime
 export function playChatNotificationSound() {
   try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const legacyWindow = window as typeof window & { webkitAudioContext?: typeof AudioContext };
+    const AudioContextClass = window.AudioContext || legacyWindow.webkitAudioContext;
     if (!AudioContextClass) return;
     
     const ctx = new AudioContextClass();

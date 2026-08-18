@@ -8,6 +8,25 @@ export type TransferStatus =
 
 export type TransferDirection = 'sent' | 'received';
 
+export interface FileTransferMeta {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  lastModified?: number;
+  senderName?: string;
+}
+
+export interface OfferedFile extends FileTransferMeta {
+  senderPeerId: string;
+  senderName: string;
+}
+
+export type SignalingPayload =
+  | { type: 'offer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'answer'; sdp: RTCSessionDescriptionInit }
+  | { type: 'candidate'; candidate: RTCIceCandidateInit };
+
 export interface TransferItem {
   id: string;
   name: string;
