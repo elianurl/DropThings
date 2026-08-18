@@ -379,11 +379,11 @@ async function startServer() {
   }
 
   server.listen(port, '0.0.0.0', () => {
-    console.log(`DropThing signaling server listening on http://0.0.0.0:${port}`);
+    console.log(`DropThings signaling server listening on http://0.0.0.0:${port}`);
   });
 }
 
 startServer().catch((error: unknown) => {
-  console.error('DropThing failed to start.', error);
+  console.error('DropThings failed to start.', error);
   process.exitCode = 1;
 });

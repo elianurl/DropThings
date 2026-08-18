@@ -1,18 +1,21 @@
 import { TransferHistoryItem } from '../types';
 
-const HISTORY_KEY = 'dropthing.transferHistory.v1';
-const LEGACY_HISTORY_KEY = 'qrdrop_transfer_history_v1';
+const HISTORY_KEY = 'dropthings.transferHistory.v1';
+const LEGACY_HISTORY_KEYS = ['dropthing.transferHistory.v1', 'qrdrop_transfer_history_v1'];
 
 function readStoredHistory(): string | null {
   const current = localStorage.getItem(HISTORY_KEY);
   if (current) return current;
 
-  const legacy = localStorage.getItem(LEGACY_HISTORY_KEY);
-  if (legacy) {
+  for (const legacyKey of LEGACY_HISTORY_KEYS) {
+    const legacy = localStorage.getItem(legacyKey);
+    if (!legacy) continue;
+
     localStorage.setItem(HISTORY_KEY, legacy);
-    localStorage.removeItem(LEGACY_HISTORY_KEY);
+    LEGACY_HISTORY_KEYS.forEach((key) => localStorage.removeItem(key));
+    return legacy;
   }
-  return legacy;
+  return null;
 }
 
 export function getHistory(): TransferHistoryItem[] {

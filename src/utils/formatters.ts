@@ -45,13 +45,14 @@ export function detectDeviceName(): { name: string; originalName: string; type: 
 
   let name = originalName;
   try {
-    const aliasKey = 'dropthing.deviceAlias';
-    const legacyAliasKey = 'qrdrop_device_alias';
-    const savedAlias = localStorage.getItem(aliasKey) || localStorage.getItem(legacyAliasKey);
+    const aliasKey = 'dropthings.deviceAlias';
+    const legacyAliasKeys = ['dropthing.deviceAlias', 'qrdrop_device_alias'];
+    const savedAlias = localStorage.getItem(aliasKey)
+      || legacyAliasKeys.map((key) => localStorage.getItem(key)).find(Boolean);
     if (savedAlias && savedAlias.trim()) {
       name = savedAlias.trim();
       localStorage.setItem(aliasKey, name);
-      localStorage.removeItem(legacyAliasKey);
+      legacyAliasKeys.forEach((key) => localStorage.removeItem(key));
     }
   } catch (e) {
     // Ignore localStorage error

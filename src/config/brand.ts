@@ -1,6 +1,5 @@
 export const BRAND = {
-  name: 'DropThing',
+  name: 'DropThings',
   tagline: 'Share whatever you want, wherever you want.',
   productUrl: 'https://dropthings.vercel.app',
 } as const;
-

@@ -1,8 +1,8 @@
 {
-  "name": "dropthing",
+  "name": "dropthings",
   "private": true,
   "version": "0.1.0",
-  "description": "DropThing — Share whatever you want, wherever you want.",
+  "description": "DropThings — Share whatever you want, wherever you want.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

@@ -14,19 +14,22 @@ export interface SavedRoom {
   messages: TextShareItem[];
 }
 
-const ROOMS_KEY = 'dropthing.savedRooms.v1';
-const LEGACY_ROOMS_KEY = 'qrdrop_saved_rooms_v2';
+const ROOMS_KEY = 'dropthings.savedRooms.v1';
+const LEGACY_ROOMS_KEYS = ['dropthing.savedRooms.v1', 'qrdrop_saved_rooms_v2'];
 
 function readStoredRooms(): string | null {
   const current = localStorage.getItem(ROOMS_KEY);
   if (current) return current;
 
-  const legacy = localStorage.getItem(LEGACY_ROOMS_KEY);
-  if (legacy) {
+  for (const legacyKey of LEGACY_ROOMS_KEYS) {
+    const legacy = localStorage.getItem(legacyKey);
+    if (!legacy) continue;
+
     localStorage.setItem(ROOMS_KEY, legacy);
-    localStorage.removeItem(LEGACY_ROOMS_KEY);
+    LEGACY_ROOMS_KEYS.forEach((key) => localStorage.removeItem(key));
+    return legacy;
   }
-  return legacy;
+  return null;
 }
 
 export function getSavedRooms(): SavedRoom[] {

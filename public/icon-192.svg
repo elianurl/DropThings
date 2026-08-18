@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="DropThing">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" role="img" aria-label="DropThings">
   <defs>
-    <linearGradient id="dropthing-gradient" x1="30" y1="24" x2="162" y2="168" gradientUnits="userSpaceOnUse">
+    <linearGradient id="dropthings-gradient" x1="30" y1="24" x2="162" y2="168" gradientUnits="userSpaceOnUse">
       <stop stop-color="#22d3ee"/>
       <stop offset="1" stop-color="#2563eb"/>
     </linearGradient>
   </defs>
   <rect width="192" height="192" rx="48" fill="#050507"/>
-  <path d="M96 30c27 33 45 54 45 81a45 45 0 1 1-90 0c0-27 18-48 45-81Z" fill="url(#dropthing-gradient)"/>
+  <path d="M96 30c27 33 45 54 45 81a45 45 0 1 1-90 0c0-27 18-48 45-81Z" fill="url(#dropthings-gradient)"/>
   <path d="M96 60v57m-21-21 21 21 21-21" fill="none" stroke="#050507" stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M72 141h48" fill="none" stroke="#050507" stroke-width="12" stroke-linecap="round"/>
 </svg>

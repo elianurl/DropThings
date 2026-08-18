@@ -2,9 +2,9 @@
 
 ## Producto y marca
 
-Este repositorio contiene **DropThing**, una aplicación para compartir archivos y mensajes entre dispositivos.
+Este repositorio contiene **DropThings**, una aplicación para compartir archivos y mensajes entre dispositivos.
 
-- Nombre exacto: `DropThing`.
+- Nombre exacto: `DropThings`.
 - Lema exacto: `Share whatever you want, wherever you want.`
 - URL canónica: `https://dropthings.vercel.app`.
 - La interfaz está escrita en español; el lema oficial permanece en inglés.
@@ -89,7 +89,7 @@ Cuando se modifique el protocolo, actualiza de forma coordinada `server.ts`, `sr
 - Conserva el sistema visual oscuro, con cian/azul como acento principal.
 - Los controles interactivos deben mantener nombre accesible, foco visible y área táctil suficiente.
 - No comuniques “sin límites” mientras el receptor ensamble archivos completos en memoria.
-- Mantén metadatos HTML, favicon, textos visibles y descargas alineados con la marca.
+- Mantén metadatos HTML, favicon, manifiesto PWA, iconos Apple/Android/Windows, textos visibles y descargas alineados con la marca.
 
 ## Despliegue
 

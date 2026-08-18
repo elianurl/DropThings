@@ -37,7 +37,7 @@ before(async () => {
     const timeout = setTimeout(() => reject(new Error('Server did not start in time')), 5_000);
     server.once('error', reject);
     server.stdout.on('data', (chunk) => {
-      if (chunk.toString().includes('DropThing signaling server listening')) {
+      if (chunk.toString().includes('DropThings signaling server listening')) {
         clearTimeout(timeout);
         resolve();
       }

@@ -1,8 +1,8 @@
-# DropThing
+# DropThings
 
 > **Share whatever you want, wherever you want.**
 
-DropThing permite compartir archivos y mensajes directamente entre dispositivos mediante salas temporales, códigos QR, WebRTC y un servidor ligero de señalización. Los archivos no se almacenan de forma permanente en el servidor.
+DropThings permite compartir archivos y mensajes directamente entre dispositivos mediante salas temporales, códigos QR, WebRTC y un servidor ligero de señalización. Los archivos no se almacenan de forma permanente en el servidor.
 
 Aplicación pública: [dropthings.vercel.app](https://dropthings.vercel.app)
 
@@ -30,7 +30,7 @@ flowchart TD
 - `src/`: aplicación React, interfaz, almacenamiento local y gestor WebRTC.
 - `shared/protocol.ts`: validaciones y límites compartidos por navegador y servidor.
 - `server.ts`: señalización, presencia, autorización de salas y relé de respaldo.
-- `public/`: favicon e iconos de la marca DropThing.
+- `public/`: favicon, manifiesto e iconos de la marca DropThings para navegadores, Apple, Android/PWA, Safari y Windows.
 
 Las salas viven en memoria y se eliminan diez minutos después de que salga el último participante. Reiniciar el servidor elimina todas las salas activas.
 
@@ -99,11 +99,11 @@ Antes de publicar:
 - Los archivos recibidos se ensamblan actualmente en memoria en el navegador. Para archivos muy grandes se recomienda evolucionar hacia Streams API y escritura progresiva en disco.
 - El historial, los alias, las credenciales administrativas y los PIN utilizados se guardan en el almacenamiento local del navegador. No uses un dispositivo compartido para salas sensibles.
 
-DropThing ofrece salas efímeras, no cuentas de usuario ni almacenamiento permanente. Un código de sala o PIN compartido concede acceso a esa sesión.
+DropThings ofrece salas efímeras, no cuentas de usuario ni almacenamiento permanente. Un código de sala o PIN compartido concede acceso a esa sesión.
 
 ## Identidad de producto
 
-- Nombre escrito siempre como **DropThing**.
+- Nombre escrito siempre como **DropThings**.
 - Lema oficial: **“Share whatever you want, wherever you want.”**
 - Interfaz principal en español; el lema se conserva en inglés.
 - URL canónica: `https://dropthings.vercel.app`.
@@ -111,4 +111,3 @@ DropThing ofrece salas efímeras, no cuentas de usuario ni almacenamiento perman
 ## Licencia
 
 No se ha definido todavía una licencia pública. Hasta que se añada un archivo `LICENSE`, se mantienen todos los derechos reservados por el propietario del repositorio.
-

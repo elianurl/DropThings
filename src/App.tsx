@@ -393,7 +393,7 @@ export default function App() {
     if (!trimmed) return;
     setDeviceInfo((prev) => {
       try {
-        localStorage.setItem('dropthing.deviceAlias', trimmed);
+        localStorage.setItem('dropthings.deviceAlias', trimmed);
       } catch {
         // Device aliases are optional when browser storage is unavailable.
       }

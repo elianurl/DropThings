@@ -257,7 +257,7 @@ export class WebRTCManager {
     };
 
     if (isInitiator) {
-      const dc = pc.createDataChannel('dropthing-channel', { ordered: true });
+      const dc = pc.createDataChannel('dropthings-channel', { ordered: true });
       this.setupDataChannel(targetPeerId, dc);
 
       pc.createOffer().then(async (offer) => {
